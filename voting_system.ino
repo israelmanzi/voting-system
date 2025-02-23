@@ -10,9 +10,7 @@ SoftwareSerial mySerial(2, 3);
 
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-uint8_t id;
 
-// Helper function to clear LCD and print new message
 void updateLCD(const char* line1, const char* line2 = "") {
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -27,190 +25,104 @@ void setup() {
   Serial.begin(9600);
   lcd.init();
   lcd.backlight();
-  
-  updateLCD("Fingerprint", "Sensor Init...");
-  delay(1000);
+
+  updateLCD("System", "Starting...");
+  delay(2000);
 
   finger.begin(57600);
 
   if (finger.verifyPassword()) {
-    updateLCD("Sensor Found!", "");
+    updateLCD("Sensor Ready", "Place finger");
+    delay(2000);
   } else {
-    updateLCD("Sensor Not Found", "Check Wiring!");
-    while (1) { delay(1); }
+    updateLCD("Sensor Error!", "Check wiring");
+    while (1) {
+      delay(1);
+    }
   }
-
-  // Display sensor parameters
-  updateLCD("Reading Sensor", "Parameters...");
-  finger.getParameters();
-  delay(1000);
-  
-  char buffer[16];
-  sprintf(buffer, "%d", finger.capacity);
-  updateLCD("Capacity:", buffer);
-  delay(1000);
 }
 
-uint8_t readnumber(void) {
-  uint8_t num = 0;
-  updateLCD("Enter ID #:", "1-127");
-  
-  while (num == 0) {
-    while (!Serial.available());
-    num = Serial.parseInt();
+uint8_t getFingerprintID() {
+  uint8_t p = finger.getImage();
+  switch (p) {
+    case FINGERPRINT_OK:
+      break;
+    case FINGERPRINT_NOFINGER:
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      updateLCD("Read Error", "Try again");
+      delay(2000);
+      return p;
+    case FINGERPRINT_IMAGEFAIL:
+      updateLCD("Imaging Error", "Try again");
+      delay(2000);
+      return p;
+    default:
+      updateLCD("Unknown Error", "Try again");
+      delay(2000);
+      return p;
   }
-  return num;
+
+  // Convert image
+  p = finger.image2Tz();
+  switch (p) {
+    case FINGERPRINT_OK:
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      updateLCD("Image unclear", "Try again");
+      delay(2000);
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      updateLCD("Read Error", "Try again");
+      delay(2000);
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+    case FINGERPRINT_INVALIDIMAGE:
+      updateLCD("Invalid scan", "Try again");
+      delay(2000);
+      return p;
+    default:
+      updateLCD("Unknown Error", "Try again");
+      delay(2000);
+      return p;
+  }
+
+  // Search for match
+  p = finger.fingerFastSearch();
+  if (p == FINGERPRINT_OK) {
+    char buffer[16];
+    sprintf(buffer, "ID: %d", finger.fingerID);
+    updateLCD("Access Granted", buffer);
+    delay(3000);  // Show success message longer
+    return p;
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    updateLCD("Read Error", "Try again");
+    delay(2000);
+    return p;
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    updateLCD("Not Registered", "Access Denied");
+    delay(3000);  // Show denial message longer
+    return p;
+  } else {
+    updateLCD("Search Error", "Try again");
+    delay(2000);
+    return p;
+  }
+
+  return finger.fingerID;
 }
 
 void loop() {
-  updateLCD("Ready to Enroll", "Enter ID#: 1-127");
-  id = readnumber();
-  
-  if (id == 0) {
+  updateLCD("Ready", "Place finger");
+  delay(50);  // Small delay to prevent display flicker
+
+  uint8_t result = getFingerprintID();
+
+  if (result == FINGERPRINT_NOFINGER) {
+    // No finger detected, continue polling
     return;
   }
-  
-  char buffer[16];
-  sprintf(buffer, "%d", id);
-  updateLCD("Enrolling ID #", buffer);
+
+  // After showing result message, delay before next scan
   delay(1000);
-
-  while (!getFingerprintEnroll());
-}
-
-uint8_t getFingerprintEnroll() {
-  int p = -1;
-  char buffer[16];
-  sprintf(buffer, "ID #%d", id);
-  updateLCD("Place Finger", buffer);
-
-  while (p != FINGERPRINT_OK) {
-    p = finger.getImage();
-    switch (p) {
-      case FINGERPRINT_OK:
-        updateLCD("Image Taken", "");
-        break;
-      case FINGERPRINT_NOFINGER:
-        updateLCD("Waiting for", "Finger...");
-        break;
-      case FINGERPRINT_PACKETRECIEVEERR:
-        updateLCD("Comm Error", "");
-        break;
-      case FINGERPRINT_IMAGEFAIL:
-        updateLCD("Imaging Error", "");
-        break;
-      default:
-        updateLCD("Unknown Error", "");
-        break;
-    }
-  }
-
-  p = finger.image2Tz(1);
-  switch (p) {
-    case FINGERPRINT_OK:
-      updateLCD("Image Converted", "");
-      break;
-    case FINGERPRINT_IMAGEMESS:
-      updateLCD("Image Too Messy", "");
-      return p;
-    case FINGERPRINT_PACKETRECIEVEERR:
-      updateLCD("Comm Error", "");
-      return p;
-    case FINGERPRINT_FEATUREFAIL:
-    case FINGERPRINT_INVALIDIMAGE:
-      updateLCD("No Fingerprint", "Features Found");
-      return p;
-    default:
-      updateLCD("Unknown Error", "");
-      return p;
-  }
-
-  updateLCD("Remove Finger", "");
-  delay(2000);
-  p = 0;
-  while (p != FINGERPRINT_NOFINGER) {
-    p = finger.getImage();
-  }
-
-  p = -1;
-  updateLCD("Place Same", "Finger Again");
-
-  while (p != FINGERPRINT_OK) {
-    p = finger.getImage();
-    switch (p) {
-      case FINGERPRINT_OK:
-        updateLCD("Image Taken", "");
-        break;
-      case FINGERPRINT_NOFINGER:
-        updateLCD("Waiting for", "Finger...");
-        break;
-      case FINGERPRINT_PACKETRECIEVEERR:
-        updateLCD("Comm Error", "");
-        break;
-      case FINGERPRINT_IMAGEFAIL:
-        updateLCD("Imaging Error", "");
-        break;
-      default:
-        updateLCD("Unknown Error", "");
-        break;
-    }
-  }
-
-  p = finger.image2Tz(2);
-  switch (p) {
-    case FINGERPRINT_OK:
-      updateLCD("Image Converted", "");
-      break;
-    case FINGERPRINT_IMAGEMESS:
-      updateLCD("Image Too Messy", "");
-      return p;
-    case FINGERPRINT_PACKETRECIEVEERR:
-      updateLCD("Comm Error", "");
-      return p;
-    case FINGERPRINT_FEATUREFAIL:
-    case FINGERPRINT_INVALIDIMAGE:
-      updateLCD("No Fingerprint", "Features Found");
-      return p;
-    default:
-      updateLCD("Unknown Error", "");
-      return p;
-  }
-
-  sprintf(buffer, "ID #%d", id);
-  updateLCD("Creating Model", buffer);
-
-  p = finger.createModel();
-  if (p == FINGERPRINT_OK) {
-    updateLCD("Prints Matched!", "");
-  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
-    updateLCD("Comm Error", "");
-    return p;
-  } else if (p == FINGERPRINT_ENROLLMISMATCH) {
-    updateLCD("Prints Did Not", "Match!");
-    return p;
-  } else {
-    updateLCD("Unknown Error", "");
-    return p;
-  }
-
-  sprintf(buffer, "%d", id);
-  updateLCD("Storing ID #", buffer);
-  p = finger.storeModel(id);
-  if (p == FINGERPRINT_OK) {
-    updateLCD("Stored!", "");
-  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
-    updateLCD("Comm Error", "");
-    return p;
-  } else if (p == FINGERPRINT_BADLOCATION) {
-    updateLCD("Invalid", "Storage Location");
-    return p;
-  } else if (p == FINGERPRINT_FLASHERR) {
-    updateLCD("Flash Write", "Error");
-    return p;
-  } else {
-    updateLCD("Unknown Error", "");
-    return p;
-  }
-
-  return true;
 }
