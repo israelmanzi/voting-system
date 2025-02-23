@@ -8,17 +8,15 @@ SoftwareSerial mySerial(2, 3);
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-#define RECORD_SIZE 5
+#define RECORD_SIZE 6
 #define MAX_FINGERPRINTS 127
 #define MAX_SCAN_ATTEMPTS 2
 #define SCAN_RETRY_DELAY 1000
 
-// Button pins
 #define BUTTON_VIEW 4
 #define BUTTON_AUTH 5
 #define BUTTON_REG 6
 
-// Global variables
 unsigned int votesCandidate1 = 0;
 unsigned int votesCandidate2 = 0;
 uint8_t currentVoterID = 0;
@@ -56,6 +54,7 @@ bool saveFingerprint(uint8_t id) {
   EEPROM.write(addr, 1);
   unsigned long timestamp = millis();
   EEPROM.put(addr + 1, timestamp);
+  EEPROM.write(addr + 5, 0);
   return true;
 }
 
@@ -66,32 +65,51 @@ bool isFingerSaved(uint8_t id) {
   return EEPROM.read(addr) == 1;
 }
 
+bool hasVoted(uint8_t id) {
+  if (id >= MAX_FINGERPRINTS)
+    return true;
+  int addr = getEEPROMAddress(id);
+  return EEPROM.read(addr + 5) == 1;
+}
+
+void markAsVoted(uint8_t id) {
+  if (id >= MAX_FINGERPRINTS)
+    return;
+  int addr = getEEPROMAddress(id);
+  EEPROM.write(addr + 5, 1);
+}
+
 uint8_t authFingerprint() {
   int attempts = 0;
   while (attempts < MAX_SCAN_ATTEMPTS) {
     uint8_t p = finger.getImage();
-    
+
     if (p == FINGERPRINT_NOFINGER) {
       delay(100);
       continue;
     }
-    
+
     if (p != FINGERPRINT_OK) {
       updateLCD("Scan Error", "Try Again");
       delay(1000);
       return p;
     }
-    
+
     p = finger.image2Tz();
     if (p != FINGERPRINT_OK) {
       updateLCD("Image Error", "Try Again");
       delay(1000);
       return p;
     }
-    
+
     p = finger.fingerFastSearch();
     if (p == FINGERPRINT_OK) {
       if (isFingerSaved(finger.fingerID)) {
+        if (hasVoted(finger.fingerID)) {
+          updateLCD("Already Voted", "Access Denied");
+          delay(2000);
+          return FINGERPRINT_NOTFOUND;
+        }
         currentVoterID = finger.fingerID;
         char buffer[16];
         sprintf(buffer, "ID: %d", finger.fingerID);
@@ -104,14 +122,14 @@ uint8_t authFingerprint() {
         return FINGERPRINT_NOTFOUND;
       }
     }
-    
+
     attempts++;
     if (attempts >= MAX_SCAN_ATTEMPTS) {
       updateLCD("Timeout", "Try Again");
       delay(1000);
       return FINGERPRINT_TIMEOUT;
     }
-    
+
     updateLCD("Not Found", "Try Again");
     delay(1000);
   }
@@ -122,37 +140,37 @@ bool verifyVoterFingerprint(uint8_t storedID) {
   int attempts = 0;
   while (attempts < MAX_SCAN_ATTEMPTS) {
     uint8_t p = finger.getImage();
-    
+
     if (p == FINGERPRINT_NOFINGER) {
       delay(100);
       continue;
     }
-    
+
     if (p != FINGERPRINT_OK) {
       updateLCD("Scan Error", "Try Again");
       delay(1000);
       return false;
     }
-    
+
     p = finger.image2Tz();
     if (p != FINGERPRINT_OK) {
       updateLCD("Process Error", "Try Again");
       delay(1000);
       return false;
     }
-    
+
     p = finger.fingerFastSearch();
     if (p == FINGERPRINT_OK && finger.fingerID == storedID) {
       return true;
     }
-    
+
     attempts++;
     if (attempts >= MAX_SCAN_ATTEMPTS) {
       updateLCD("Timeout", "Try Again");
       delay(1000);
       return false;
     }
-    
+
     delay(SCAN_RETRY_DELAY);
   }
   return false;
@@ -161,60 +179,71 @@ bool verifyVoterFingerprint(uint8_t storedID) {
 uint8_t registerFingerprint() {
   updateLCD("New Register", "Place Finger");
   delay(2000);
-  
+
   uint8_t p = finger.getImage();
   if (p != FINGERPRINT_OK)
     return p;
-    
+
   p = finger.image2Tz();
   if (p != FINGERPRINT_OK)
     return p;
-    
+
   p = finger.fingerFastSearch();
   if (p == FINGERPRINT_OK) {
     updateLCD("Already Exists", "Try Different");
     delay(2000);
     return FINGERPRINT_NOFINGER;
   }
-  
-  // Enroll sequence
+
   p = finger.getImage();
   if (p != FINGERPRINT_OK)
     return p;
-    
+
   p = finger.image2Tz(1);
   if (p != FINGERPRINT_OK)
     return p;
-    
+
   updateLCD("Remove Finger", "");
   delay(2000);
-  
+
   p = 0;
   while (p != FINGERPRINT_NOFINGER) {
     p = finger.getImage();
   }
-  
+
   updateLCD("Place Same", "Finger Again");
-  
-  p = finger.getImage();
-  if (p != FINGERPRINT_OK)
-    return p;
-    
+
+  p = FINGERPRINT_NOFINGER;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) {
+      delay(500);
+    } else if (p != FINGERPRINT_OK) {
+      updateLCD("Scan Error", "Try Again");
+      delay(1000);
+      return p;
+    }
+  }
+
   p = finger.image2Tz(2);
   if (p != FINGERPRINT_OK)
     return p;
-    
-  // Create model
+
   p = finger.createModel();
   if (p != FINGERPRINT_OK)
     return p;
-    
-  // Get ID for new finger
+
   uint8_t id = 1;
-  while (isFingerSaved(id) && id < MAX_FINGERPRINTS) {
+  while (id < MAX_FINGERPRINTS && isFingerSaved(id)) {
     id++;
   }
-  
+
+  if (id >= MAX_FINGERPRINTS) {
+    updateLCD("Database Full", "Cannot Register");
+    delay(2000);
+    return FINGERPRINT_PACKETRECIEVEERR;
+  }
+
   p = finger.storeModel(id);
   if (p == FINGERPRINT_OK) {
     if (saveFingerprint(id)) {
@@ -225,7 +254,7 @@ uint8_t registerFingerprint() {
       return FINGERPRINT_OK;
     }
   }
-  
+
   updateLCD("Register Failed", "Try Again");
   delay(2000);
   return p;
@@ -248,7 +277,7 @@ void setup() {
     updateLCD("Sensor Error!", "Check wiring");
     while (1);
   }
-  
+
   currentState = MAIN_MENU;
   updateLCD("Ready", "Select Option");
 }
@@ -287,7 +316,7 @@ void loop() {
     case REGISTER_MODE:
       {
         uint8_t result = registerFingerprint();
-        delay(1000);  // Give time to read the result
+        delay(1000);
         currentState = MAIN_MENU;
       }
       break;
@@ -310,11 +339,11 @@ void loop() {
       if (verifyVoterFingerprint(currentVoterID)) {
         if (currentVoteCandidate == 1) {
           votesCandidate1++;
-          updateLCD("Vote Recorded", "Candidate 1");
         } else {
           votesCandidate2++;
-          updateLCD("Vote Recorded", "Candidate 2");
         }
+        markAsVoted(currentVoterID);
+        updateLCD("Vote Recorded", currentVoteCandidate == 1 ? "Candidate 1" : "Candidate 2");
         delay(2000);
         currentVoterID = 0;
         currentVoteCandidate = 0;
