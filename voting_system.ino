@@ -20,6 +20,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define RED_LED 9
 #define GREEN_LED 10
 
+#define LONG_PRESS_DURATION 3000
+
 unsigned int votesCandidate1 = 0;
 unsigned int votesCandidate2 = 0;
 uint8_t currentVoterID = 0;
@@ -32,7 +34,8 @@ enum State
   REGISTER_MODE,
   VOTE_CONFIRM,
   VOTE_SCAN,
-  VIEW_VOTES
+  VIEW_VOTES,
+  RESET_CONFIRM
 };
 
 State currentState = MAIN_MENU;
@@ -104,6 +107,62 @@ void markAsVoted(uint8_t id)
     return;
   int addr = getEEPROMAddress(id);
   EEPROM.write(addr + 5, 1);
+}
+
+void resetSystem() {
+  votesCandidate1 = 0;
+  votesCandidate2 = 0;
+
+  updateLCD("Resetting", "Fingerprints...");
+
+  Serial.println("Registered fingerprints before reset:");
+
+  uint8_t registeredCount = 0;
+  for (uint8_t id = 1; id < MAX_FINGERPRINTS; id++) {
+    if (isFingerSaved(id)) {
+      Serial.print("ID #");
+      Serial.print(id);
+      Serial.print(" - ");
+
+      int addr = getEEPROMAddress(id);
+      unsigned long timestamp;
+      EEPROM.get(addr + 1, timestamp);
+
+      bool hasVotedStatus = EEPROM.read(addr + 5) == 1;
+
+      Serial.print("Registered at: ");
+      Serial.print(timestamp);
+      Serial.print(", Voted: ");
+      Serial.println(hasVotedStatus ? "Yes" : "No");
+
+      registeredCount++;
+    }
+  }
+
+  Serial.print("Total registered fingerprints: ");
+  Serial.println(registeredCount);
+
+  for (uint8_t id = 1; id < MAX_FINGERPRINTS; id++) {
+    int addr = getEEPROMAddress(id);
+    EEPROM.write(addr, 0);
+    EEPROM.write(addr + 5, 0);
+
+    unsigned long zeroTimestamp = 0;
+    EEPROM.put(addr + 1, zeroTimestamp);
+
+    if (isFingerSaved(id)) {
+      finger.deleteModel(id);
+    }
+  }
+
+  updateLCD("Clearing", "Database...");
+  finger.emptyDatabase();
+
+  indicateSuccess();
+  updateLCD("System Reset", "Complete");
+  delay(2000);
+
+  Serial.println("System reset complete - all fingerprint data cleared");
 }
 
 uint8_t authFingerprint()
@@ -380,111 +439,162 @@ void setup()
 
 void loop()
 {
+  if (digitalRead(BUTTON_VIEW) == LOW && currentState == MAIN_MENU) {
+    updateLCD("Hold for Reset", "");
+
+    unsigned long pressStartTime = millis();
+    while (digitalRead(BUTTON_VIEW) == LOW) {
+      int elapsedTime = (millis() - pressStartTime) / 1000;
+      char countdownText[16];
+      sprintf(countdownText, "Wait: %d sec", 3 - elapsedTime);
+      updateLCD("Hold for Reset", countdownText);
+
+      if (millis() - pressStartTime >= LONG_PRESS_DURATION) {
+        currentState = RESET_CONFIRM;
+        break;
+      }
+      delay(100);
+    }
+
+    if (currentState != RESET_CONFIRM) {
+      if (millis() - pressStartTime < 500) {
+        currentState = VIEW_VOTES;
+      } else {
+        currentState = MAIN_MENU;
+        updateLCD("Ready", "Select Option");
+      }
+    }
+  }
+
   switch (currentState)
   {
-  case MAIN_MENU:
-    updateLCD("1:Auth 2:Reg", "3:Votes");
-    if (digitalRead(BUTTON_AUTH) == LOW)
-    {
-      delay(200);
-      currentState = AUTH_SCAN;
-      updateLCD("Auth Mode", "Place Finger");
-    }
-    else if (digitalRead(BUTTON_REG) == LOW)
-    {
-      delay(200);
-      currentState = REGISTER_MODE;
-    }
-    else if (digitalRead(BUTTON_VIEW) == LOW)
-    {
-      delay(200);
-      currentState = VIEW_VOTES;
-    }
-    break;
-
-  case AUTH_SCAN:
-  {
-    uint8_t result = authFingerprint();
-    if (result == FINGERPRINT_OK)
-    {
-      currentState = VOTE_CONFIRM;
-      updateLCD("Select Vote", "1:C1 2:C2");
-    }
-    else if (result == FINGERPRINT_NOFINGER)
-    {
-      updateLCD("Auth Mode", "Place Finger");
-    }
-    else
-    {
-      currentState = MAIN_MENU;
-    }
-  }
-  break;
-
-  case REGISTER_MODE:
-  {
-    uint8_t result = registerFingerprint();
-    delay(1000);
-    currentState = MAIN_MENU;
-  }
-  break;
-
-  case VOTE_CONFIRM:
-    if (digitalRead(BUTTON_AUTH) == LOW)
-    {
-      delay(200);
-      updateLCD("Confirm Vote", "Place Finger");
-      currentState = VOTE_SCAN;
-      currentVoteCandidate = 1;
-    }
-    else if (digitalRead(BUTTON_REG) == LOW)
-    {
-      delay(200);
-      updateLCD("Confirm Vote", "Place Finger");
-      currentState = VOTE_SCAN;
-      currentVoteCandidate = 2;
-    }
-    break;
-
-  case VOTE_SCAN:
-    if (verifyVoterFingerprint(currentVoterID))
-    {
-      if (currentVoteCandidate == 1)
+    case MAIN_MENU:
+      updateLCD("1:Auth 2:Reg", "3:Votes/Reset");
+      if (digitalRead(BUTTON_AUTH) == LOW)
       {
-        votesCandidate1++;
+        delay(200);
+        currentState = AUTH_SCAN;
+        updateLCD("Auth Mode", "Place Finger");
+      }
+      else if (digitalRead(BUTTON_REG) == LOW)
+      {
+        delay(200);
+        currentState = REGISTER_MODE;
+      }
+      break;
+
+    case AUTH_SCAN:
+      {
+        uint8_t result = authFingerprint();
+        if (result == FINGERPRINT_OK)
+        {
+          currentState = VOTE_CONFIRM;
+          updateLCD("Select Vote", "1:C1 2:C2");
+        }
+        else if (result == FINGERPRINT_NOFINGER)
+        {
+          updateLCD("Auth Mode", "Place Finger");
+        }
+        else
+        {
+          currentState = MAIN_MENU;
+        }
+      }
+      break;
+
+    case REGISTER_MODE:
+      {
+        uint8_t result = registerFingerprint();
+        delay(1000);
+        currentState = MAIN_MENU;
+      }
+      break;
+
+    case VOTE_CONFIRM:
+      if (digitalRead(BUTTON_AUTH) == LOW)
+      {
+        delay(200);
+        updateLCD("Confirm Vote", "Place Finger");
+        currentState = VOTE_SCAN;
+        currentVoteCandidate = 1;
+      }
+      else if (digitalRead(BUTTON_REG) == LOW)
+      {
+        delay(200);
+        updateLCD("Confirm Vote", "Place Finger");
+        currentState = VOTE_SCAN;
+        currentVoteCandidate = 2;
+      }
+      break;
+
+    case VOTE_SCAN:
+      if (verifyVoterFingerprint(currentVoterID))
+      {
+        if (currentVoteCandidate == 1)
+        {
+          votesCandidate1++;
+        }
+        else
+        {
+          votesCandidate2++;
+        }
+        markAsVoted(currentVoterID);
+        updateLCD("Vote Recorded", currentVoteCandidate == 1 ? "Candidate 1" : "Candidate 2");
+        indicateSuccess();
+        delay(2000);
+        currentVoterID = 0;
+        currentVoteCandidate = 0;
+        currentState = MAIN_MENU;
       }
       else
       {
-        votesCandidate2++;
+        updateLCD("Auth Failed", "Vote Cancelled");
+        indicateError();
+        delay(2000);
+        currentVoterID = 0;
+        currentVoteCandidate = 0;
+        currentState = MAIN_MENU;
       }
-      markAsVoted(currentVoterID);
-      updateLCD("Vote Recorded", currentVoteCandidate == 1 ? "Candidate 1" : "Candidate 2");
-      indicateSuccess();
-      delay(2000);
-      currentVoterID = 0;
-      currentVoteCandidate = 0;
-      currentState = MAIN_MENU;
-    }
-    else
-    {
-      updateLCD("Auth Failed", "Vote Cancelled");
-      indicateError();
-      delay(2000);
-      currentVoterID = 0;
-      currentVoteCandidate = 0;
-      currentState = MAIN_MENU;
-    }
-    break;
+      break;
 
-  case VIEW_VOTES:
-  {
-    char line1[17], line2[17];
-    sprintf(line1, "C1:%u votes", votesCandidate1);
-    sprintf(line2, "C2:%u votes", votesCandidate2);
-    updateLCD(line1, line2);
-    delay(4000);
-    currentState = MAIN_MENU;
-  }
-  break;
+    case VIEW_VOTES:
+      {
+        char line1[17], line2[17];
+        sprintf(line1, "C1:%u votes", votesCandidate1);
+        sprintf(line2, "C2:%u votes", votesCandidate2);
+        updateLCD(line1, line2);
+        delay(4000);
+        currentState = MAIN_MENU;
+      }
+      break;
+
+    case RESET_CONFIRM:
+      updateLCD("Confirm Reset?", "1:Yes 2:No");
+
+      unsigned long confirmStartTime = millis();
+      bool confirmationReceived = false;
+
+      while (millis() - confirmStartTime < 5000 && !confirmationReceived) {
+        if (digitalRead(BUTTON_AUTH) == LOW) {
+          delay(200);
+          resetSystem();
+          confirmationReceived = true;
+        }
+        else if (digitalRead(BUTTON_REG) == LOW) {
+          delay(200);
+          updateLCD("Reset Cancelled", "");
+          delay(1000);
+          confirmationReceived = true;
+        }
+        delay(100);
+      }
+
+      if (!confirmationReceived) {
+        updateLCD("Reset Timeout", "Cancelled");
+        delay(1000);
+      }
+
+      currentState = MAIN_MENU;
+      break;
   }
 }
